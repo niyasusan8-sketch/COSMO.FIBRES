@@ -5,15 +5,15 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
-  auth, db, storage, googleProvider, signInWithPopup, signOut, onAuthStateChanged, 
+  auth, db, googleProvider, signInWithPopup, signOut, onAuthStateChanged, 
   signInWithEmailAndPassword, createUserWithEmailAndPassword,
-  collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy,
-  ref, uploadBytes, getDownloadURL, deleteObject
+  collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy
 } from "./firebase";
 
 const PHONE_NUMBER = "919447478429"; 
 const DISPLAY_PHONE = "+91 9447478429";
-const MAP_LINK = "https://www.google.com/maps/dir/11.3112413,75.75112/Cosmo+Fibres,+Pathoor+Tower+Room+no.1246+A1+Puthiyara+Rd+Nr.+Sabha+school+Kozhikode+4,+Kozhikode,+Kerala+673004/@11.2827178,75.7487465,14z/data=!3m1!4b1!4m9!4m8!1m1!4e1!1m5!1m1!1s0x3ba6598c23c00a7d:0xf2dfb76b77264f49!2m2!1d75.7877233!2d11.2553017";
+const MAP_LINK_PUTHIYARA = "https://www.google.com/maps/dir/11.3112413,75.75112/Cosmo+Fibres,+Pathoor+Tower+Room+no.1246+A1+Puthiyara+Rd+Nr.+Sabha+school+Kozhikode+4,+Kozhikode,+Kerala+673004/@11.2827178,75.7487465,14z/data=!3m1!4b1!4m9!4m8!1m1!4e1!1m5!1m1!1s0x3ba6598c23c00a7d:0xf2dfb76b77264f49!2m2!1d75.7877233!2d11.2553017";
+const MAP_LINK_PAVANGADU = "https://www.google.com/maps?sca_esv=c7b63db539d9a6f3&sxsrf=ANbL-n4y8P1GsL3AGlAgqxJr-moJx04WLw:1773596159084&fbs=ADc_l-bYsCM_rR9GIcCz9AqkWo3Y2-uKCABnux-pWMGbqTcOHROBNAfTBZTUHA5QsajZB5ybY22DNdsTHGgZMMupLINWEbx0DvNvgv4fdfSXSdkWO5Q7rUVQ6YHhyD9fSeBMoOY3tFNRJDMrKT9_VuKgIG_zsKM_r3PdyujNscgdsCaCZbjMRX7D4iWDdSxGBo7xhST1jnXinRGy3ABqXu_tK7T2IsCSeD1_SwqRB7ICi5eUn_k73dU&biw=1536&bih=826&dpr=1.25&um=1&ie=UTF-8&fb=1&gl=in&sa=X&geocode=KZmdjB8AX6Y7MWNg5eUzCN5Q&daddr=8Q84%2BFV7+davasanu+complex,+Kandamkulangara,+Kozhikode,+Kerala+673021";
 
 const CATEGORIES = ["Ladies", "Gents", "Kids", "Others"];
 
@@ -78,9 +78,8 @@ export default function App() {
 
   // CRUD States
   const [isEditing, setIsEditing] = useState<string | null>(null); 
-  const [isUploading, setIsUploading] = useState(false);
   const [form, setForm] = useState({
-    name: "", category: "Ladies", price: "", desc: "", images: [] as {url: string, file?: File}[]
+    name: "", category: "Ladies", price: "", desc: "", images: [] as string[]
   });
 
   // --- FETCH DATA ---
@@ -160,34 +159,47 @@ export default function App() {
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
     const files = Array.from(e.target.files) as File[];
-    
-    const newImages = files.map(file => ({
-      url: URL.createObjectURL(file),
-      file
-    }));
-    
-    setForm(f => ({ ...f, images: [...f.images, ...newImages] }));
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          // Slightly higher quality limit to give better photos, but still under 1MB
+          const MAX_WIDTH = 1200;
+          const MAX_HEIGHT = 1200;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, width, height);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.8); // 80% quality
+          setForm(f => ({ ...f, images: [...f.images, dataUrl] }));
+        };
+        img.src = reader.result as string;
+      };
+      reader.readAsDataURL(file);
+    });
   };
 
   const saveToInventory = async () => {
     if (!form.name || form.images.length === 0) return alert("Missing required fields (Name and at least 1 image).");
     if (!auth.currentUser) return alert("You must be logged in to save products.");
     
-    setIsUploading(true);
     try {
-      const finalImageUrls: string[] = [];
-      
-      for (const img of form.images) {
-        if (img.file) {
-          const fileRef = ref(storage, `products/${Date.now()}_${img.file.name}`);
-          await uploadBytes(fileRef, img.file);
-          const downloadUrl = await getDownloadURL(fileRef);
-          finalImageUrls.push(downloadUrl);
-        } else {
-          finalImageUrls.push(img.url);
-        }
-      }
-
       if (isEditing) {
         const productRef = doc(db, "products", isEditing);
         const originalProduct = products.find(p => p.id === isEditing);
@@ -196,7 +208,7 @@ export default function App() {
           category: form.category,
           price: form.price,
           desc: form.desc,
-          images: finalImageUrls,
+          images: form.images,
           // Keep original immutable fields
           createdAt: originalProduct?.createdAt || Date.now(),
           authorUID: originalProduct?.authorUID || auth.currentUser.uid
@@ -208,7 +220,7 @@ export default function App() {
           category: form.category,
           price: form.price,
           desc: form.desc,
-          images: finalImageUrls,
+          images: form.images,
           createdAt: Date.now(),
           authorUID: auth.currentUser.uid
         });
@@ -219,27 +231,12 @@ export default function App() {
     } catch (err) {
       alert("Error saving product. Check console for details.");
       handleFirestoreError(err, isEditing ? OperationType.UPDATE : OperationType.CREATE, "products");
-    } finally {
-      setIsUploading(false);
     }
   };
 
   const removeProduct = async (id: string) => {
     if(window.confirm("Delete this product permanently?")) {
       try {
-        const product = products.find(p => p.id === id);
-        if (product && product.images) {
-          for (const url of product.images) {
-            try {
-              if (url.includes('firebasestorage')) {
-                const imageRef = ref(storage, url);
-                await deleteObject(imageRef);
-              }
-            } catch (e) {
-              console.warn("Could not delete image from storage", e);
-            }
-          }
-        }
         await deleteDoc(doc(db, "products", id));
       } catch (err) {
         handleFirestoreError(err, OperationType.DELETE, `products/${id}`);
@@ -248,16 +245,13 @@ export default function App() {
   };
 
   const startEdit = (product: any) => {
-    setForm({
-      ...product,
-      images: product.images.map((url: string) => ({ url }))
-    });
+    setForm(product);
     setIsEditing(product.id);
     window.scrollTo(0, 0);
   };
 
   const getWhatsAppLink = (pName: string) => {
-    const msg = encodeURIComponent(`Hi Cosmo Fibers, I am interested in ${pName}.`);
+    const msg = encodeURIComponent(`Hi Cosmo Fibres, I am interested in ${pName}.`);
     return `https://wa.me/${PHONE_NUMBER}?text=${msg}`;
   };
 
@@ -270,13 +264,17 @@ export default function App() {
     <div className="min-h-screen bg-royal-bg text-royal-text font-sans selection:bg-royal-gold selection:text-royal-bg">
       
       {/* --- 1. TOP TOGGLE BAR --- */}
-      <div className="bg-royal-surface text-royal-muted h-10 flex justify-center items-center gap-8 text-xs font-medium tracking-widest fixed top-0 w-full z-50 border-b border-royal-border">
+      <div className="bg-royal-surface text-royal-muted h-10 flex justify-center items-center gap-4 md:gap-8 text-[10px] md:text-xs font-medium tracking-widest fixed top-0 w-full z-50 border-b border-royal-border">
         <a href={`tel:${PHONE_NUMBER}`} className="flex items-center gap-2 hover:text-royal-gold transition-colors">
           <Phone size={14} /> CALL US
         </a>
         <div className="w-px h-4 bg-royal-border" />
-        <a href={MAP_LINK} target="_blank" rel="noreferrer" className="flex items-center gap-2 hover:text-royal-gold transition-colors">
-          <MapPin size={14} /> SHOP LOCATION
+        <a href={MAP_LINK_PUTHIYARA} target="_blank" rel="noreferrer" className="flex items-center gap-2 hover:text-royal-gold transition-colors">
+          <MapPin size={14} /> PUTHIYARA
+        </a>
+        <div className="w-px h-4 bg-royal-border hidden sm:block" />
+        <a href={MAP_LINK_PAVANGADU} target="_blank" rel="noreferrer" className="flex items-center gap-2 hover:text-royal-gold transition-colors">
+          <MapPin size={14} /> PAVANGADU
         </a>
       </div>
 
@@ -286,7 +284,7 @@ export default function App() {
           className="font-serif text-2xl md:text-3xl font-bold tracking-wide cursor-pointer text-royal-text" 
           onClick={() => setView("home")}
         >
-          COSMO <span className="text-royal-gold italic font-normal">Fibers</span>
+          COSMO <span className="text-royal-gold italic font-normal">Fibres</span>
         </div>
         <div className="flex items-center gap-6 md:gap-10">
           <button className="text-xs font-bold tracking-[0.2em] hover:text-royal-gold transition-colors" onClick={() => setView("home")}>HOME</button>
@@ -373,15 +371,19 @@ export default function App() {
             <motion.div key="h" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
               <section className="max-w-7xl mx-auto px-6 md:px-12 py-12 md:py-24 grid md:grid-cols-2 gap-12 md:gap-20 items-center">
                 <div>
-                  <h4 className="text-xs uppercase text-royal-gold mb-4 tracking-[0.3em] font-semibold">Est. 1999 • Puthiyara Road</h4>
+                  <h4 className="text-xs uppercase text-royal-gold mb-4 tracking-[0.3em] font-semibold">EST. 1998 • PUTHIYARA & PAVANGADU</h4>
                   <h1 className="font-serif text-5xl md:text-7xl leading-[1.1] mb-8 text-royal-text">
-                    Premium Retail <br/>
-                    <span className="text-royal-gold italic font-light">Elegance.</span>
+                    COSMO <br/>
+                    <span className="text-royal-gold italic font-light">Fibres.</span>
                   </h1>
-                  <p className="text-lg text-royal-muted leading-relaxed mb-10 max-w-md">
-                    Established in 1999, Cosmo Fibers stands at Pathoor Tower, Puthiyara Road, Kozhikode. 
-                    Top-notch product quality and customer centricity are core to our philosophy.
-                  </p>
+                  <div className="font-serif text-lg text-royal-muted leading-relaxed mb-10 max-w-xl space-y-4">
+                    <p>
+                      Cosmo Fibres is a trusted manufacturer of high-quality fibre glass mannequins in Kerala. Since 1998, we have been the sole manufacturers of fibre glass mannequins in Kerala, delivering durable and visually appealing display solutions for retailers and businesses.
+                    </p>
+                    <p>
+                      We offer a wide range of female mannequins, male mannequins, and other display products, along with reliable services. All our products come with a guarantee, ensuring quality, durability, and timely delivery.
+                    </p>
+                  </div>
                   <button 
                     className="bg-royal-gold text-royal-bg px-8 py-4 rounded-sm font-bold tracking-widest text-xs hover:bg-white transition-all flex items-center gap-3"
                     onClick={() => setView("collection")}
@@ -389,11 +391,12 @@ export default function App() {
                     EXPLORE SHOWROOM <ArrowRight size={16}/>
                   </button>
                 </div>
-                <div className="relative h-[500px] md:h-[700px] rounded-t-full overflow-hidden shadow-2xl shadow-black/50 border-8 border-royal-surface">
+                <div className="relative h-[600px] md:h-[800px] rounded-t-full overflow-hidden shadow-2xl shadow-black/50 border-8 border-royal-surface">
                   <img 
-                    src="https://images.unsplash.com/photo-1520006403909-838d6b92c22e?auto=format&fit=crop&w=2000&q=100" 
+                    src="https://upload.wikimedia.org/wikipedia/commons/9/9f/Holt_Renfrew_Mannequins.jpg" 
                     className="w-full h-full object-cover" 
-                    alt="Royal Boutique Mannequins" 
+                    alt="Holt Renfrew Mannequins" 
+                    referrerPolicy="no-referrer"
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-royal-bg/80 via-transparent to-transparent" />
                 </div>
@@ -599,7 +602,7 @@ export default function App() {
                       <div className="flex gap-4 mt-6 flex-wrap justify-center">
                         {form.images.map((img, i) => (
                           <div key={i} className="relative group">
-                            <img src={img.url} className="w-24 h-24 object-cover rounded-sm border border-royal-border shadow-sm" alt="Upload preview" />
+                            <img src={img} className="w-24 h-24 object-cover rounded-sm border border-royal-border shadow-sm" alt="Upload preview" />
                             <button 
                               className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
                               onClick={() => setForm({...form, images: form.images.filter((_, idx) => idx !== i)})}
@@ -615,11 +618,10 @@ export default function App() {
 
                 <div className="flex gap-4">
                   <button 
-                    className="flex-1 bg-royal-gold text-royal-bg py-4 rounded-sm font-bold text-xs tracking-widest hover:bg-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="flex-1 bg-royal-gold text-royal-bg py-4 rounded-sm font-bold text-xs tracking-widest hover:bg-white transition-colors"
                     onClick={saveToInventory}
-                    disabled={isUploading}
                   >
-                    {isUploading ? "UPLOADING..." : (isEditing ? "UPDATE ITEM" : "ADD TO CATALOG")}
+                    {isEditing ? "UPDATE ITEM" : "ADD TO CATALOG"}
                   </button>
                   {isEditing && (
                     <button 
@@ -680,7 +682,7 @@ export default function App() {
       <footer className="bg-royal-surface text-royal-muted py-16 px-6 md:px-12 border-t border-royal-border">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-8">
           <div className="text-center md:text-left">
-            <h3 className="font-serif text-2xl text-royal-text mb-2">COSMO <span className="text-royal-gold italic">Fibers</span></h3>
+            <h3 className="font-serif text-2xl text-royal-text mb-2">COSMO <span className="text-royal-gold italic">Fibres</span></h3>
             <p className="text-sm tracking-widest uppercase mb-1">Kerala, India • {DISPLAY_PHONE}</p>
             <p className="text-[10px] tracking-widest uppercase text-royal-muted/50">* All prices are exclusive of 18% GST and transportation charges.</p>
           </div>
