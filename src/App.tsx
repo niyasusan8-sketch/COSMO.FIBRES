@@ -4,12 +4,64 @@ import {
   Trash2, Camera, Edit3, MessageCircle, ArrowRight, Settings, Lock, X
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { 
+  auth, db, storage, googleProvider, signInWithPopup, signOut, onAuthStateChanged, 
+  signInWithEmailAndPassword, createUserWithEmailAndPassword,
+  collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy,
+  ref, uploadBytes, getDownloadURL, deleteObject
+} from "./firebase";
 
 const PHONE_NUMBER = "919447478429"; 
 const DISPLAY_PHONE = "+91 9447478429";
 const MAP_LINK = "https://www.google.com/maps/dir/11.3112413,75.75112/Cosmo+Fibres,+Pathoor+Tower+Room+no.1246+A1+Puthiyara+Rd+Nr.+Sabha+school+Kozhikode+4,+Kozhikode,+Kerala+673004/@11.2827178,75.7487465,14z/data=!3m1!4b1!4m9!4m8!1m1!4e1!1m5!1m1!1s0x3ba6598c23c00a7d:0xf2dfb76b77264f49!2m2!1d75.7877233!2d11.2553017";
 
 const CATEGORIES = ["Ladies", "Gents", "Kids", "Others"];
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string;
+    email?: string | null;
+    emailVerified?: boolean;
+    isAnonymous?: boolean;
+    tenantId?: string | null;
+    providerInfo: any[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 export default function App() {
   const [view, setView] = useState("home"); 
@@ -22,104 +74,184 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [showPasscodeModal, setShowPasscodeModal] = useState(false);
   const [passcode, setPasscode] = useState("");
-  const [passcodeError, setPasscodeError] = useState("");
+  const [authError, setAuthError] = useState("");
 
   // CRUD States
   const [isEditing, setIsEditing] = useState<string | null>(null); 
+  const [isUploading, setIsUploading] = useState(false);
   const [form, setForm] = useState({
-    name: "", category: "Ladies", price: "", desc: "", images: [] as string[]
+    name: "", category: "Ladies", price: "", desc: "", images: [] as {url: string, file?: File}[]
   });
 
   // --- FETCH DATA ---
   useEffect(() => {
-    fetchProducts();
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setIsAdmin(true);
+      } else {
+        setIsAdmin(false);
+      }
+    });
+
+    const q = query(collection(db, "products"), orderBy("createdAt", "desc"));
+    const unsubscribeProducts = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setProducts(data);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, "products");
+    });
+
+    return () => {
+      unsubscribeAuth();
+      unsubscribeProducts();
+    };
   }, []);
 
-  const fetchProducts = async () => {
+  // --- ACTIONS ---
+  const handlePasscodeLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passcode) return;
+    
+    const email = "admin@cosmofibers.com";
     try {
-      const res = await fetch('/api/products');
-      const data = await res.json();
-      setProducts(data);
-    } catch (err) {
-      console.error("Failed to fetch products", err);
+      await signInWithEmailAndPassword(auth, email, passcode);
+      setShowPasscodeModal(false);
+      setView("admin");
+      setAuthError("");
+      setPasscode("");
+    } catch (err: any) {
+      if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found') {
+        try {
+          await createUserWithEmailAndPassword(auth, email, passcode);
+          setShowPasscodeModal(false);
+          setView("admin");
+          setAuthError("");
+          setPasscode("");
+        } catch (createErr: any) {
+          if (createErr.code === 'auth/email-already-in-use') {
+            setAuthError("Incorrect passcode.");
+          } else {
+            setAuthError("Please enable Email/Password in Firebase Console first.");
+          }
+        }
+      } else {
+        setAuthError(err.message);
+      }
     }
   };
 
-  // --- ACTIONS ---
-  const handlePasscodeSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleGoogleLogin = async () => {
     try {
-      const res = await fetch('/api/auth', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ passcode })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setIsAdmin(true);
-        setShowPasscodeModal(false);
-        setView("admin");
-        setPasscode("");
-        setPasscodeError("");
-      } else {
-        setPasscodeError("Incorrect passcode");
-      }
-    } catch (err) {
-      setPasscodeError("Authentication failed");
+      await signInWithPopup(auth, googleProvider);
+      setShowPasscodeModal(false);
+      setView("admin");
+      setAuthError("");
+    } catch (err: any) {
+      setAuthError(err.message || "Authentication failed");
     }
+  };
+
+  const handleLogout = async () => {
+    await signOut(auth);
+    setIsAdmin(false);
+    setView("home");
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
     const files = Array.from(e.target.files) as File[];
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onloadend = () => setForm(f => ({ ...f, images: [...f.images, reader.result as string] }));
-      reader.readAsDataURL(file);
-    });
+    
+    const newImages = files.map(file => ({
+      url: URL.createObjectURL(file),
+      file
+    }));
+    
+    setForm(f => ({ ...f, images: [...f.images, ...newImages] }));
   };
 
   const saveToInventory = async () => {
-    if (!form.name || form.images.length === 0) return alert("Missing required fields.");
+    if (!form.name || form.images.length === 0) return alert("Missing required fields (Name and at least 1 image).");
+    if (!auth.currentUser) return alert("You must be logged in to save products.");
     
+    setIsUploading(true);
     try {
+      const finalImageUrls: string[] = [];
+      
+      for (const img of form.images) {
+        if (img.file) {
+          const fileRef = ref(storage, `products/${Date.now()}_${img.file.name}`);
+          await uploadBytes(fileRef, img.file);
+          const downloadUrl = await getDownloadURL(fileRef);
+          finalImageUrls.push(downloadUrl);
+        } else {
+          finalImageUrls.push(img.url);
+        }
+      }
+
       if (isEditing) {
-        await fetch(`/api/products/${isEditing}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(form)
+        const productRef = doc(db, "products", isEditing);
+        const originalProduct = products.find(p => p.id === isEditing);
+        await updateDoc(productRef, {
+          name: form.name,
+          category: form.category,
+          price: form.price,
+          desc: form.desc,
+          images: finalImageUrls,
+          // Keep original immutable fields
+          createdAt: originalProduct?.createdAt || Date.now(),
+          authorUID: originalProduct?.authorUID || auth.currentUser.uid
         });
         setIsEditing(null);
       } else {
-        await fetch('/api/products', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(form)
+        await addDoc(collection(db, "products"), {
+          name: form.name,
+          category: form.category,
+          price: form.price,
+          desc: form.desc,
+          images: finalImageUrls,
+          createdAt: Date.now(),
+          authorUID: auth.currentUser.uid
         });
       }
       
       setForm({ name: "", category: "Ladies", price: "", desc: "", images: [] });
-      fetchProducts();
       alert("Catalog successfully updated.");
     } catch (err) {
-      console.error("Failed to save product", err);
-      alert("Error saving product.");
+      alert("Error saving product. Check console for details.");
+      handleFirestoreError(err, isEditing ? OperationType.UPDATE : OperationType.CREATE, "products");
+    } finally {
+      setIsUploading(false);
     }
   };
 
   const removeProduct = async (id: string) => {
     if(window.confirm("Delete this product permanently?")) {
       try {
-        await fetch(`/api/products/${id}`, { method: 'DELETE' });
-        fetchProducts();
+        const product = products.find(p => p.id === id);
+        if (product && product.images) {
+          for (const url of product.images) {
+            try {
+              if (url.includes('firebasestorage')) {
+                const imageRef = ref(storage, url);
+                await deleteObject(imageRef);
+              }
+            } catch (e) {
+              console.warn("Could not delete image from storage", e);
+            }
+          }
+        }
+        await deleteDoc(doc(db, "products", id));
       } catch (err) {
-        console.error("Failed to delete product", err);
+        handleFirestoreError(err, OperationType.DELETE, `products/${id}`);
       }
     }
   };
 
   const startEdit = (product: any) => {
-    setForm(product);
+    setForm({
+      ...product,
+      images: product.images.map((url: string) => ({ url }))
+    });
     setIsEditing(product.id);
     window.scrollTo(0, 0);
   };
@@ -194,9 +326,9 @@ export default function App() {
                 </div>
               </div>
               <h3 className="font-serif text-2xl text-center mb-2 text-royal-text">Staff Access</h3>
-              <p className="text-center text-royal-muted text-sm mb-6">Enter passcode to manage inventory</p>
+              <p className="text-center text-royal-muted text-sm mb-6">Enter passcode or use Google to manage inventory.</p>
               
-              <form onSubmit={handlePasscodeSubmit}>
+              <form onSubmit={handlePasscodeLogin} className="mb-4">
                 <input 
                   type="password" 
                   autoFocus
@@ -205,14 +337,29 @@ export default function App() {
                   placeholder="Enter Passcode"
                   className="w-full px-4 py-3 bg-royal-bg border border-royal-border rounded-lg focus:outline-none focus:ring-1 focus:ring-royal-gold focus:border-royal-gold text-center tracking-widest mb-4 text-royal-text placeholder:text-royal-muted/50"
                 />
-                {passcodeError && <p className="text-red-400 text-xs text-center mb-4">{passcodeError}</p>}
                 <button 
                   type="submit"
                   className="w-full bg-royal-gold text-royal-bg py-3 rounded-lg font-bold tracking-wide hover:bg-white transition-colors"
                 >
-                  AUTHENTICATE
+                  ENTER PASSCODE
                 </button>
               </form>
+
+              <div className="flex items-center gap-4 mb-4">
+                <div className="flex-1 h-px bg-royal-border"></div>
+                <span className="text-xs text-royal-muted font-bold tracking-widest">OR</span>
+                <div className="flex-1 h-px bg-royal-border"></div>
+              </div>
+
+              <div className="flex flex-col gap-4">
+                <button 
+                  onClick={handleGoogleLogin}
+                  className="w-full border border-royal-border text-royal-text py-3 rounded-lg font-bold tracking-wide hover:bg-royal-surface transition-colors flex items-center justify-center gap-2"
+                >
+                  SIGN IN WITH GOOGLE
+                </button>
+                {authError && <p className="text-red-400 text-xs text-center">{authError}</p>}
+              </div>
             </motion.div>
           </motion.div>
         )}
@@ -351,7 +498,11 @@ export default function App() {
                 <div className="flex flex-col justify-center">
                   <span className="text-xs font-bold tracking-[0.2em] text-royal-gold uppercase mb-4">{selectedProduct.category}</span>
                   <h1 className="font-serif text-4xl md:text-5xl text-royal-text mb-6 leading-tight">{selectedProduct.name}</h1>
-                  <h2 className="text-2xl font-light text-royal-muted mb-8">{selectedProduct.price}</h2>
+                  
+                  <div className="mb-8">
+                    <h2 className="text-2xl font-light text-royal-muted mb-1">{selectedProduct.price}</h2>
+                    <p className="text-[11px] text-royal-muted/60 tracking-wider uppercase font-medium">* GST 18% & Transportation charges extra</p>
+                  </div>
                   
                   <div className="w-12 h-px bg-royal-gold mb-8" />
                   
@@ -390,7 +541,7 @@ export default function App() {
                     <h2 className="font-serif text-3xl text-royal-text">{isEditing ? "Update Product" : "Manage Inventory"}</h2>
                   </div>
                   <button 
-                    onClick={() => { setIsAdmin(false); setView("home"); }}
+                    onClick={handleLogout}
                     className="text-xs font-bold tracking-widest text-royal-muted hover:text-red-400 transition-colors flex items-center gap-2"
                   >
                     <Lock size={14} /> LOGOUT
@@ -448,7 +599,7 @@ export default function App() {
                       <div className="flex gap-4 mt-6 flex-wrap justify-center">
                         {form.images.map((img, i) => (
                           <div key={i} className="relative group">
-                            <img src={img} className="w-24 h-24 object-cover rounded-sm border border-royal-border shadow-sm" alt="Upload preview" />
+                            <img src={img.url} className="w-24 h-24 object-cover rounded-sm border border-royal-border shadow-sm" alt="Upload preview" />
                             <button 
                               className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
                               onClick={() => setForm({...form, images: form.images.filter((_, idx) => idx !== i)})}
@@ -464,10 +615,11 @@ export default function App() {
 
                 <div className="flex gap-4">
                   <button 
-                    className="flex-1 bg-royal-gold text-royal-bg py-4 rounded-sm font-bold text-xs tracking-widest hover:bg-white transition-colors"
+                    className="flex-1 bg-royal-gold text-royal-bg py-4 rounded-sm font-bold text-xs tracking-widest hover:bg-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     onClick={saveToInventory}
+                    disabled={isUploading}
                   >
-                    {isEditing ? "UPDATE ITEM" : "ADD TO CATALOG"}
+                    {isUploading ? "UPLOADING..." : (isEditing ? "UPDATE ITEM" : "ADD TO CATALOG")}
                   </button>
                   {isEditing && (
                     <button 
@@ -529,7 +681,8 @@ export default function App() {
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-8">
           <div className="text-center md:text-left">
             <h3 className="font-serif text-2xl text-royal-text mb-2">COSMO <span className="text-royal-gold italic">Fibers</span></h3>
-            <p className="text-sm tracking-widest uppercase">Kerala, India • {DISPLAY_PHONE}</p>
+            <p className="text-sm tracking-widest uppercase mb-1">Kerala, India • {DISPLAY_PHONE}</p>
+            <p className="text-[10px] tracking-widest uppercase text-royal-muted/50">* All prices are exclusive of 18% GST and transportation charges.</p>
           </div>
           <div className="text-center md:text-right">
             <p className="text-xs tracking-widest uppercase opacity-50 mb-2">© 2026 Premium Showroom Excellence</p>

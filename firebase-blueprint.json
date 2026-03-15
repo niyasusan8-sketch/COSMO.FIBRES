@@ -1,0 +1,74 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "A product in the boutique inventory.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The name of the product."
+        },
+        "category": {
+          "type": "string",
+          "description": "The category of the product (e.g., Ladies, Gents, Kids, Others)."
+        },
+        "price": {
+          "type": "string",
+          "description": "The price or price range of the product."
+        },
+        "desc": {
+          "type": "string",
+          "description": "The description of the product."
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "An array of image URLs (base64 or hosted) for the product."
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Timestamp of when the product was created."
+        },
+        "authorUID": {
+          "type": "string",
+          "description": "The UID of the admin who created the product."
+        }
+      },
+      "required": ["name", "category", "images", "createdAt", "authorUID"]
+    },
+    "User": {
+      "title": "User",
+      "description": "A user of the application, typically an admin.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "The email address of the user."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin"],
+          "description": "The role of the user."
+        }
+      },
+      "required": ["email", "role"]
+    }
+  },
+  "firestore": {
+    "products/{productId}": {
+      "schema": {
+        "$ref": "#/entities/Product"
+      },
+      "description": "The collection of products in the inventory."
+    },
+    "users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/User"
+      },
+      "description": "The collection of users (admins)."
+    }
+  }
+}
