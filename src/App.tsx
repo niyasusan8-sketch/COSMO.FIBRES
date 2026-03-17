@@ -1,13 +1,15 @@
 import React, { useState, useEffect, useRef } from "react";
 import { 
   Phone, MapPin, Search, ChevronLeft, ChevronRight,
-  Trash2, Camera, Edit3, MessageCircle, ArrowRight, Settings, Lock, X, Loader2, Share2, GripHorizontal, Facebook, Link as LinkIcon
+  Trash2, Camera, Edit3, MessageCircle, ArrowRight, Settings, Lock, X, Loader2, Share2, GripHorizontal, Facebook, Link as LinkIcon, Image as ImageIcon
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { Helmet } from "react-helmet-async";
+import imageCompression from 'browser-image-compression';
 import { 
   auth, db, googleProvider, signInWithPopup, signOut, onAuthStateChanged, 
   signInWithEmailAndPassword, createUserWithEmailAndPassword,
-  collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy
+  collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy
 } from "./firebase";
 
 const PHONE_NUMBER = "919447478429"; 
@@ -15,7 +17,7 @@ const DISPLAY_PHONE = "+91 9447478429";
 const MAP_LINK_PUTHIYARA = "https://www.google.com/maps/dir/11.3112413,75.75112/Cosmo+Fibres,+Pathoor+Tower+Room+no.1246+A1+Puthiyara+Rd+Nr.+Sabha+school+Kozhikode+4,+Kozhikode,+Kerala+673004/@11.2827178,75.7487465,14z/data=!3m1!4b1!4m9!4m8!1m1!4e1!1m5!1m1!1s0x3ba6598c23c00a7d:0xf2dfb76b77264f49!2m2!1d75.7877233!2d11.2553017";
 const MAP_LINK_PAVANGADU = "https://www.google.com/maps?sca_esv=c7b63db539d9a6f3&sxsrf=ANbL-n4y8P1GsL3AGlAgqxJr-moJx04WLw:1773596159084&fbs=ADc_l-bYsCM_rR9GIcCz9AqkWo3Y2-uKCABnux-pWMGbqTcOHROBNAfTBZTUHA5QsajZB5ybY22DNdsTHGgZMMupLINWEbx0DvNvgv4fdfSXSdkWO5Q7rUVQ6YHhyD9fSeBMoOY3tFNRJDMrKT9_VuKgIG_zsKM_r3PdyujNscgdsCaCZbjMRX7D4iWDdSxGBo7xhST1jnXinRGy3ABqXu_tK7T2IsCSeD1_SwqRB7ICi5eUn_k73dU&biw=1536&bih=826&dpr=1.25&um=1&ie=UTF-8&fb=1&gl=in&sa=X&geocode=KZmdjB8AX6Y7MWNg5eUzCN5Q&daddr=8Q84%2BFV7+davasanu+complex,+Kandamkulangara,+Kozhikode,+Kerala+673021";
 
-const CATEGORIES = ["Ladies", "Gents", "Kids", "Others"];
+const CATEGORIES = ["Ladies", "Gents", "Kids", "Hangers", "Others"];
 
 enum OperationType {
   CREATE = 'create',
@@ -69,15 +71,20 @@ export default function App() {
   const [selectedProduct, setSelectedProduct] = useState<any>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
+  const [lookbookUrl, setLookbookUrl] = useState("");
 
   // New UI States
   const [isLoading, setIsLoading] = useState(true);
+  const [isLookbookModalOpen, setIsLookbookModalOpen] = useState(false);
+  const [modalIframeUrl, setModalIframeUrl] = useState("");
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [draggedImgIdx, setDraggedImgIdx] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
   const [showShareMenu, setShowShareMenu] = useState(false);
   const shareMenuRef = useRef<HTMLDivElement>(null);
+  const [forceUpdate, setForceUpdate] = useState(0);
   
   // Premium UI States
   const [toast, setToast] = useState<{message: string, type: 'success' | 'error'} | null>(null);
@@ -97,7 +104,7 @@ export default function App() {
   // CRUD States
   const [isEditing, setIsEditing] = useState<string | null>(null); 
   const [form, setForm] = useState({
-    name: "", category: "Ladies", price: "", desc: "", images: [] as string[]
+    name: "", category: "Ladies", desc: "", images: [] as string[], externalLink: ""
   });
 
   // --- FETCH DATA ---
@@ -127,11 +134,15 @@ export default function App() {
       setIsLoading(false);
       
       // Handle direct links to products
-      if (window.location.hash.startsWith('#product-')) {
-        const pid = window.location.hash.replace('#product-', '');
+      const params = new URLSearchParams(window.location.search);
+      let pid = params.get('p') || window.location.hash.replace('#product-', '');
+      let imgIdx = parseInt(params.get('img') || '0', 10);
+      if (pid) {
+        pid = pid.replace(/\/$/, '').trim();
         const p = data.find(x => x.id === pid);
         if (p) {
           setSelectedProduct(p);
+          setCurrentImageIndex(isNaN(imgIdx) ? 0 : imgIdx);
           setView("detail");
         }
       }
@@ -140,20 +151,76 @@ export default function App() {
       setIsLoading(false);
     });
 
+    const unsubscribeSettings = onSnapshot(doc(db, "settings", "general"), (docSnap) => {
+      if (docSnap.exists()) {
+        setLookbookUrl(docSnap.data().lookbookUrl || "");
+      }
+    }, (error) => {
+      console.error("Error fetching settings:", error);
+    });
+
+    const handlePopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      let pid = params.get('p');
+      let imgIdx = parseInt(params.get('img') || '0', 10);
+      if (pid) {
+        pid = pid.replace(/\/$/, '').trim();
+        // We need to find the product from the current products state
+        // Since this is inside a useEffect, we might not have the latest products
+        // But we can just set a flag or rely on the next render
+        setView("detail");
+        setCurrentImageIndex(isNaN(imgIdx) ? 0 : imgIdx);
+        // We can't easily access the latest products here without adding it to dependencies,
+        // so we use a state to force the other useEffect to run
+        setForceUpdate(prev => prev + 1);
+      } else {
+        setView("home");
+        setSelectedProduct(null);
+      }
+    };
+    
+    window.addEventListener('popstate', handlePopState);
+
     return () => {
       unsubscribeAuth();
       unsubscribeProducts();
+      unsubscribeSettings();
+      window.removeEventListener('popstate', handlePopState);
     };
   }, []);
 
-  const navigateTo = (newView: string, product?: any) => {
+  // Effect to update selected product when products load or popstate happens
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    let pid = params.get('p') || window.location.hash.replace('#product-', '');
+    let imgIdx = parseInt(params.get('img') || '0', 10);
+    if (pid && products.length > 0) {
+      pid = pid.replace(/\/$/, '').trim();
+      if (!selectedProduct || selectedProduct.id !== pid) {
+        const p = products.find(x => x.id === pid);
+        if (p) {
+          setSelectedProduct(p);
+          setCurrentImageIndex(isNaN(imgIdx) ? 0 : imgIdx);
+          setView("detail");
+        }
+      } else if (selectedProduct && selectedProduct.id === pid) {
+        // If the product is already selected, just update the image index if it changed
+        const newImgIdx = isNaN(imgIdx) ? 0 : imgIdx;
+        if (currentImageIndex !== newImgIdx) {
+          setCurrentImageIndex(newImgIdx);
+        }
+      }
+    }
+  }, [products, selectedProduct, forceUpdate, currentImageIndex]);
+
+  const navigateTo = (newView: string, product?: any, imageIndex: number = 0) => {
     setView(newView);
     if (newView === 'detail' && product) {
       setSelectedProduct(product);
-      setCurrentImageIndex(0);
-      window.location.hash = `#product-${product.id}`;
+      setCurrentImageIndex(imageIndex);
+      window.history.pushState({}, '', `?p=${product.id}&img=${imageIndex}`);
     } else {
-      window.location.hash = '';
+      window.history.pushState({}, '', window.location.pathname);
       setSelectedProduct(null);
     }
     window.scrollTo(0, 0);
@@ -209,43 +276,46 @@ export default function App() {
     setView("home");
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
     const files = Array.from(e.target.files) as File[];
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const img = new Image();
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          // Slightly higher quality limit to give better photos, but still under 1MB
-          const MAX_WIDTH = 1200;
-          const MAX_HEIGHT = 1200;
-          let width = img.width;
-          let height = img.height;
-
-          if (width > height) {
-            if (width > MAX_WIDTH) {
-              height *= MAX_WIDTH / width;
-              width = MAX_WIDTH;
-            }
-          } else {
-            if (height > MAX_HEIGHT) {
-              width *= MAX_HEIGHT / height;
-              height = MAX_HEIGHT;
-            }
-          }
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          ctx?.drawImage(img, 0, 0, width, height);
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.8); // 80% quality
+    
+    showToast("Processing images...", "success");
+    
+    for (const file of files) {
+      try {
+        // Higher quality compression to maintain clarity while staying under 1MB limit
+        const options = {
+          maxSizeMB: 0.5, // 500KB per image (much clearer than before)
+          maxWidthOrHeight: 1920, // Full HD resolution
+          useWebWorker: true,
+          initialQuality: 0.9,
+        };
+        
+        const compressedFile = await imageCompression(file, options);
+        
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const dataUrl = reader.result as string;
           setForm(f => ({ ...f, images: [...f.images, dataUrl] }));
         };
-        img.src = reader.result as string;
-      };
-      reader.readAsDataURL(file);
-    });
+        reader.readAsDataURL(compressedFile);
+      } catch (error) {
+        console.error("Error compressing image:", error);
+        showToast("Error processing image", "error");
+      }
+    }
+  };
+
+  const saveSettings = async (newUrl: string) => {
+    try {
+      await setDoc(doc(db, "settings", "general"), { lookbookUrl: newUrl }, { merge: true });
+      showToast("Settings updated successfully.", "success");
+      setIsSettingsModalOpen(false);
+    } catch (err) {
+      showToast("Error saving settings.", "error");
+      handleFirestoreError(err, OperationType.WRITE, "settings/general");
+    }
   };
 
   const saveToInventory = async () => {
@@ -266,9 +336,9 @@ export default function App() {
         await updateDoc(productRef, {
           name: form.name,
           category: form.category,
-          price: form.price,
           desc: form.desc,
           images: form.images,
+          externalLink: form.externalLink || "",
           // Keep original immutable fields
           createdAt: originalProduct?.createdAt || Date.now(),
           authorUID: originalProduct?.authorUID || auth.currentUser.uid
@@ -278,15 +348,15 @@ export default function App() {
         await addDoc(collection(db, "products"), {
           name: form.name,
           category: form.category,
-          price: form.price,
           desc: form.desc,
           images: form.images,
+          externalLink: form.externalLink || "",
           createdAt: Date.now(),
           authorUID: auth.currentUser.uid
         });
       }
       
-      setForm({ name: "", category: "Ladies", price: "", desc: "", images: [] });
+      setForm({ name: "", category: "Ladies", desc: "", images: [], externalLink: "" });
       showToast("Catalog successfully updated.", "success");
     } catch (err) {
       showToast("Error saving product. Check console for details.", "error");
@@ -314,7 +384,7 @@ export default function App() {
   };
 
   const startEdit = (product: any) => {
-    setForm(product);
+    setForm({ ...product, externalLink: product.externalLink || "" });
     setIsEditing(product.id);
     window.scrollTo(0, 0);
   };
@@ -326,31 +396,108 @@ export default function App() {
 
   const handleShare = async () => {
     if (!selectedProduct) return;
-    const shareData = {
-      title: selectedProduct.name,
-      text: `Check out ${selectedProduct.name} at Cosmo Fibres`,
-      url: window.location.href,
-    };
     
-    if (navigator.share && navigator.canShare && navigator.canShare(shareData)) {
+    const shareText = `Hi Cosmo Fibres, I have an enquiry about this item:
+Product: ${selectedProduct.name}
+
+I would like to know more about:
+[ ] Price
+[ ] Color Variations
+[ ] Availability
+[ ] Shipping Details
+[ ] Other: 
+
+(Please tick what you need to know and reply to this message)`;
+    
+    if (navigator.share) {
       try {
-        await navigator.share(shareData);
+        let fileToShare: File | null = null;
+        if (selectedProduct.images && selectedProduct.images.length > 0) {
+          try {
+            const currentImage = selectedProduct.images[currentImageIndex] || selectedProduct.images[0];
+            const response = await fetch(currentImage);
+            const blob = await response.blob();
+            fileToShare = new File([blob], 'product.jpg', { type: blob.type });
+          } catch (e) {
+            console.error("Could not fetch image for sharing", e);
+          }
+        }
+
+        const shareData: any = {
+          title: selectedProduct.name,
+          text: shareText,
+        };
+
+        if (fileToShare && navigator.canShare && navigator.canShare({ files: [fileToShare], text: shareText })) {
+          shareData.files = [fileToShare];
+        }
+
+        if (navigator.canShare && navigator.canShare(shareData)) {
+          await navigator.share(shareData);
+          return;
+        }
       } catch (err) {
         console.error("Error sharing", err);
+        return;
       }
-    } else {
-      setShowShareMenu(!showShareMenu);
     }
+    
+    setShowShareMenu(!showShareMenu);
   };
 
-  const customerGallery = products.filter(p => 
-    (categoryFilter === "All" || p.category === categoryFilter) &&
-    (p.name.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
+  const customerGallery = products
+    .filter(p => 
+      (categoryFilter === "All" || p.category === categoryFilter) &&
+      (p.name.toLowerCase().includes(searchTerm.toLowerCase()))
+    )
+    .flatMap(p => 
+      categoryFilter === "All" 
+        ? p.images.map((img, idx) => ({ ...p, displayImage: img, imageIndex: idx, uniqueId: `${p.id}-${idx}` }))
+        : [{ ...p, displayImage: p.images[0], imageIndex: 0, uniqueId: p.id }]
+    );
 
   return (
     <div className="min-h-screen bg-royal-bg text-royal-text font-sans selection:bg-royal-gold selection:text-royal-bg">
+      <Helmet>
+        <title>{selectedProduct ? `${selectedProduct.name} | Cosmo Fibres` : 'Cosmo Fibres | Premium Textiles'}</title>
+        <meta name="description" content={selectedProduct?.desc || 'Discover premium textiles and fabrics at Cosmo Fibres.'} />
+        <meta property="og:title" content={selectedProduct ? `${selectedProduct.name} | Cosmo Fibres` : 'Cosmo Fibres | Premium Textiles'} />
+        <meta property="og:description" content={selectedProduct?.desc || 'Discover premium textiles and fabrics at Cosmo Fibres.'} />
+        {selectedProduct?.images?.[0] && <meta property="og:image" content={selectedProduct.images[0]} />}
+        <meta property="og:url" content={window.location.href} />
+        <meta property="og:type" content="website" />
+      </Helmet>
       
+      {/* --- PREMIUM FLOATING WHATSAPP BUTTON --- */}
+      <motion.div 
+        initial={{ scale: 0, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ delay: 1, type: "spring", stiffness: 200, damping: 20 }}
+        className="fixed bottom-8 right-8 z-50 flex items-center justify-end group"
+      >
+        <a 
+          href={`https://wa.me/${PHONE_NUMBER}?text=${encodeURIComponent("Hi Cosmo Fibres, I'm interested in your products.")}`} 
+          target="_blank" 
+          rel="noreferrer" 
+          className="relative flex items-center justify-center"
+          title="Chat with us on WhatsApp"
+        >
+          {/* Expandable Text */}
+          <span className="absolute right-full mr-4 bg-royal-bg/90 backdrop-blur-md border border-royal-gold/30 text-royal-gold text-xs font-bold tracking-widest uppercase px-4 py-2 rounded-full opacity-0 translate-x-4 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-300 pointer-events-none whitespace-nowrap shadow-lg">
+            Chat With Us
+          </span>
+          
+          {/* Pulsing rings */}
+          <span className="absolute inset-0 rounded-full bg-royal-gold/40 animate-ping opacity-75 group-hover:bg-royal-gold/60 duration-1000"></span>
+          <span className="absolute inset-[-8px] rounded-full border border-royal-gold/20 animate-[spin_4s_linear_infinite] group-hover:border-royal-gold/50 transition-colors"></span>
+          
+          {/* Main Button */}
+          <div className="relative bg-gradient-to-tr from-yellow-600 to-royal-gold text-white p-4 rounded-full shadow-[0_0_30px_rgba(212,175,55,0.3)] group-hover:shadow-[0_0_40px_rgba(212,175,55,0.6)] group-hover:scale-110 transition-all duration-300">
+            <MessageCircle size={28} className="drop-shadow-md group-hover:rotate-12 transition-transform duration-300" />
+          </div>
+        </a>
+      </motion.div>
+
       {/* --- TOAST NOTIFICATION --- */}
       <AnimatePresence>
         {toast && (
@@ -428,8 +575,8 @@ export default function App() {
           COSMO <span className="text-royal-gold italic font-normal">Fibres</span>
         </div>
         <div className="flex items-center gap-6 md:gap-10">
-          <button className="text-xs font-bold tracking-[0.2em] hover:text-royal-gold transition-colors" onClick={() => navigateTo("home")}>HOME</button>
-          <button className="text-xs font-bold tracking-[0.2em] hover:text-royal-gold transition-colors" onClick={() => navigateTo("collection")}>COLLECTION</button>
+          <button className="text-xs font-bold tracking-[0.2em] hover:text-royal-gold hover:scale-105 transition-all" onClick={() => navigateTo("home")}>HOME</button>
+          <button className="text-xs font-bold tracking-[0.2em] hover:text-royal-gold hover:scale-105 transition-all" onClick={() => navigateTo("collection")}>COLLECTION</button>
         </div>
       </nav>
 
@@ -510,14 +657,14 @@ export default function App() {
                   </h1>
                   <div className="font-serif text-lg text-royal-muted leading-relaxed mb-10 max-w-xl space-y-4">
                     <p>
-                      Cosmo Fibres is a trusted manufacturer of high-quality fibre glass mannequins in Kerala. Since 1998, we have been the sole manufacturers of fibre glass mannequins in Kerala, delivering durable and visually appealing display solutions for retailers and businesses.
+                      Since 1998, Cosmo Fibres has been Kerala's premier manufacturer of high-quality fiberglass mannequins. 
                     </p>
                     <p>
-                      We offer a wide range of female mannequins, male mannequins, and other display products, along with reliable services. All our products come with a guarantee, ensuring quality, durability, and timely delivery.
+                      We deliver durable, visually striking display solutions for modern retailers, backed by guaranteed quality and reliable service.
                     </p>
                   </div>
                   <button 
-                    className="bg-royal-gold text-royal-bg px-8 py-4 rounded-sm font-bold tracking-widest text-xs hover:bg-white transition-all flex items-center gap-3"
+                    className="bg-royal-gold text-royal-bg px-8 py-4 rounded-sm font-bold tracking-widest text-xs hover:bg-white hover:scale-105 active:scale-95 transition-all flex items-center gap-3"
                     onClick={() => navigateTo("collection")}
                   >
                     EXPLORE SHOWROOM <ArrowRight size={16}/>
@@ -554,12 +701,12 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-3 mb-12">
+              <div className="flex flex-wrap gap-3 mb-8">
                 {["All", ...CATEGORIES].map(cat => (
                   <button 
                     key={cat} 
                     onClick={() => setCategoryFilter(cat)} 
-                    className={`px-6 py-2.5 rounded-full text-xs font-bold tracking-wider transition-all ${
+                    className={`px-6 py-2.5 rounded-full text-xs font-bold tracking-wider transition-all hover:scale-105 active:scale-95 ${
                       categoryFilter === cat 
                         ? 'bg-royal-gold text-royal-bg shadow-md shadow-royal-gold/20' 
                         : 'border border-royal-border text-royal-muted hover:border-royal-gold hover:text-royal-gold'
@@ -569,6 +716,20 @@ export default function App() {
                   </button>
                 ))}
               </div>
+
+              {lookbookUrl && (
+                <div className="mb-12">
+                  <button 
+                    onClick={() => {
+                      setModalIframeUrl(lookbookUrl);
+                      setIsLookbookModalOpen(true);
+                    }}
+                    className="inline-flex items-center gap-3 px-6 py-3 bg-royal-surface border border-royal-border text-royal-gold rounded-sm font-bold text-xs tracking-widest hover:border-royal-gold hover:bg-royal-gold/5 transition-all shadow-sm"
+                  >
+                    <ImageIcon size={16} /> EXPLORE EXCLUSIVE LOOKBOOK
+                  </button>
+                </div>
+              )}
 
               {isLoading ? (
                 <div className="flex flex-col items-center justify-center py-32">
@@ -599,23 +760,22 @@ export default function App() {
                         visible: { opacity: 1, y: 0 }
                       }}
                       whileHover={{ y: -8 }}
-                      key={p.id} 
+                      key={p.uniqueId} 
                       className="bg-royal-surface group cursor-pointer border border-royal-border shadow-sm hover:shadow-xl hover:shadow-black/50 hover:border-royal-gold/50 transition-all duration-300"
-                      onClick={() => navigateTo("detail", p)}
+                      onClick={() => navigateTo("detail", p, p.imageIndex)}
                     >
-                      <div className="h-[400px] overflow-hidden bg-royal-bg relative">
-                        {p.images[0] ? (
-                          <img src={p.images[0]} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700 opacity-90 group-hover:opacity-100" alt={p.name} />
+                      <div className="overflow-hidden bg-royal-bg relative flex items-center justify-center">
+                        {p.displayImage ? (
+                          <img src={p.displayImage} loading="lazy" className="w-full h-auto object-contain group-hover:scale-105 transition-transform duration-700 opacity-90 group-hover:opacity-100" alt={p.name} />
                         ) : (
-                          <div className="w-full h-full flex items-center justify-center text-royal-border"><Camera size={48} /></div>
+                          <div className="w-full aspect-square flex items-center justify-center text-royal-border"><Camera size={48} /></div>
                         )}
                         <div className="absolute top-4 left-4 bg-royal-bg/90 backdrop-blur-sm px-3 py-1 text-[10px] font-bold tracking-widest uppercase text-royal-gold border border-royal-gold/20">
                           {p.category}
                         </div>
                       </div>
                       <div className="p-6 text-center">
-                        <h3 className="font-serif text-xl text-royal-text mb-2">{p.name}</h3>
-                        <p className="text-royal-gold font-light">{p.price}</p>
+                        <h3 className="font-serif text-xl text-royal-text">{p.name}</h3>
                       </div>
                     </motion.div>
                   ))}
@@ -629,18 +789,18 @@ export default function App() {
             <motion.div key="d" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="max-w-6xl mx-auto px-6 md:px-12 py-8">
               <button 
                 onClick={() => navigateTo("collection")} 
-                className="flex items-center gap-2 text-xs font-bold tracking-widest text-royal-gold hover:text-white transition-colors mb-8"
+                className="flex items-center gap-2 text-xs font-bold tracking-widest text-royal-gold hover:text-white hover:-translate-x-1 transition-all mb-8"
               >
                 <ChevronLeft size={16}/> BACK TO GALLERY
               </button>
               
               <div className="grid md:grid-cols-2 gap-12 lg:gap-20">
                 <div>
-                  <div className="relative bg-royal-surface rounded-sm overflow-hidden h-[500px] md:h-[700px] mb-4 border border-royal-border group">
+                  <div className="relative bg-royal-surface rounded-sm overflow-hidden mb-4 border border-royal-border group flex items-center justify-center">
                     {selectedProduct.images[currentImageIndex] ? (
-                      <img src={selectedProduct.images[currentImageIndex]} className="w-full h-full object-cover transition-opacity duration-300" alt={selectedProduct.name} />
+                      <img src={selectedProduct.images[currentImageIndex]} loading="lazy" className="w-full h-auto object-contain transition-opacity duration-300" alt={selectedProduct.name} />
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center text-royal-border"><Camera size={64} /></div>
+                      <div className="w-full aspect-square flex items-center justify-center text-royal-border"><Camera size={64} /></div>
                     )}
                     
                     {selectedProduct.images.length > 1 && (
@@ -665,8 +825,9 @@ export default function App() {
                       <img 
                         key={i} 
                         src={img} 
+                        loading="lazy"
                         onClick={() => setCurrentImageIndex(i)}
-                        className={`w-20 h-24 object-cover cursor-pointer border transition-colors ${currentImageIndex === i ? 'border-royal-gold opacity-100' : 'border-royal-border opacity-50 hover:opacity-100'}`} 
+                        className={`h-24 w-auto object-contain cursor-pointer border transition-colors bg-royal-surface ${currentImageIndex === i ? 'border-royal-gold opacity-100' : 'border-royal-border opacity-50 hover:opacity-100'}`} 
                         alt={`Thumbnail ${i}`} 
                       />
                     ))}
@@ -679,7 +840,7 @@ export default function App() {
                     <div className="relative" ref={shareMenuRef}>
                       <button 
                         onClick={handleShare}
-                        className="flex items-center gap-2 text-xs font-bold tracking-widest text-royal-muted hover:text-royal-gold transition-colors"
+                        className="flex items-center gap-2 text-xs font-bold tracking-widest text-royal-muted hover:text-royal-gold hover:scale-105 transition-all"
                       >
                         {copied ? <span className="text-emerald-400">COPIED!</span> : <><Share2 size={16}/> SHARE</>}
                       </button>
@@ -693,31 +854,31 @@ export default function App() {
                             className="absolute right-0 mt-2 w-48 bg-royal-bg border border-royal-gold/20 rounded-sm shadow-xl z-50 overflow-hidden"
                           >
                             <a 
-                              href={`https://wa.me/?text=${encodeURIComponent(`Check out ${selectedProduct.name} at Cosmo Fibres: ${window.location.href}`)}`} 
+                              href={`https://wa.me/?text=${encodeURIComponent(`Hi Cosmo Fibres, I have an enquiry about this item:\nProduct: ${selectedProduct.name}\n\nI would like to know more about:\n[ ] Price\n[ ] Color Variations\n[ ] Availability\n[ ] Shipping Details\n[ ] Other: \n\n(Please tick what you need to know and reply to this message)`)}`} 
                               target="_blank" 
                               rel="noreferrer" 
-                              className="flex items-center gap-3 px-4 py-3 text-sm text-royal-text hover:bg-royal-gold/10 transition-colors"
+                              className="flex items-center gap-3 px-4 py-3 text-sm text-royal-text hover:bg-royal-gold/10 hover:pl-5 transition-all"
                             >
                               <MessageCircle size={16} /> WhatsApp
                             </a>
                             <a 
-                              href={`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(window.location.href)}`} 
+                              href={`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(selectedProduct.images[currentImageIndex] || selectedProduct.images[0])}&quote=${encodeURIComponent(`Hi Cosmo Fibres, I have an enquiry about this item: ${selectedProduct.name}`)}`} 
                               target="_blank" 
                               rel="noreferrer" 
-                              className="flex items-center gap-3 px-4 py-3 text-sm text-royal-text hover:bg-royal-gold/10 transition-colors"
+                              className="flex items-center gap-3 px-4 py-3 text-sm text-royal-text hover:bg-royal-gold/10 hover:pl-5 transition-all"
                             >
                               <Facebook size={16} /> Facebook
                             </a>
                             <button 
                               onClick={() => { 
-                                navigator.clipboard.writeText(window.location.href); 
+                                navigator.clipboard.writeText(`Hi Cosmo Fibres, I have an enquiry about this item:\nProduct: ${selectedProduct.name}\n\nI would like to know more about:\n[ ] Price\n[ ] Color Variations\n[ ] Availability\n[ ] Shipping Details\n[ ] Other: \n\n(Please tick what you need to know and reply to this message)`); 
                                 setCopied(true); 
                                 setTimeout(() => setCopied(false), 2000); 
                                 setShowShareMenu(false); 
                               }} 
-                              className="flex items-center gap-3 w-full text-left px-4 py-3 text-sm text-royal-text hover:bg-royal-gold/10 transition-colors"
+                              className="flex items-center gap-3 w-full text-left px-4 py-3 text-sm text-royal-text hover:bg-royal-gold/10 hover:pl-5 transition-all"
                             >
-                              <LinkIcon size={16} /> Copy Link
+                              <LinkIcon size={16} /> Copy Message
                             </button>
                           </motion.div>
                         )}
@@ -726,16 +887,13 @@ export default function App() {
                   </div>
                   <h1 className="font-serif text-4xl md:text-5xl text-royal-text mb-6 leading-tight">{selectedProduct.name}</h1>
                   
-                  <div className="mb-8">
-                    <h2 className="text-2xl font-light text-royal-muted mb-1">{selectedProduct.price}</h2>
-                    <p className="text-[11px] text-royal-muted/60 tracking-wider uppercase font-medium">* GST 18% & Transportation charges extra</p>
-                  </div>
-                  
                   <div className="w-12 h-px bg-royal-gold mb-8" />
                   
-                  <p className="text-royal-muted leading-relaxed mb-12 whitespace-pre-line">
-                    {selectedProduct.desc || "No description provided."}
-                  </p>
+                  {selectedProduct.desc && (
+                    <p className="text-royal-muted leading-relaxed mb-12 whitespace-pre-line">
+                      {selectedProduct.desc}
+                    </p>
+                  )}
                   
                   <div className="flex flex-col sm:flex-row gap-4">
                     <a 
@@ -746,6 +904,17 @@ export default function App() {
                     >
                       <MessageCircle size={18}/> WHATSAPP INQUIRY
                     </a>
+                    {selectedProduct.externalLink && (
+                      <button 
+                        onClick={() => {
+                          setModalIframeUrl(selectedProduct.externalLink);
+                          setIsLookbookModalOpen(true);
+                        }}
+                        className="flex-1 border-2 border-royal-gold text-royal-gold py-4 px-6 rounded-sm font-bold text-xs tracking-widest flex items-center justify-center gap-3 hover:bg-royal-gold hover:text-royal-bg transition-colors"
+                      >
+                        <LinkIcon size={18}/> MORE PHOTOS
+                      </button>
+                    )}
                     <a 
                       href={`tel:${PHONE_NUMBER}`} 
                       className="flex-1 border-2 border-royal-gold text-royal-gold py-4 px-6 rounded-sm font-bold text-xs tracking-widest flex items-center justify-center gap-3 hover:bg-royal-gold hover:text-royal-bg transition-colors"
@@ -767,12 +936,20 @@ export default function App() {
                     <h4 className="text-xs uppercase text-royal-gold tracking-[0.2em] font-semibold mb-2">Staff Portal</h4>
                     <h2 className="font-serif text-3xl text-royal-text">{isEditing ? "Update Product" : "Manage Inventory"}</h2>
                   </div>
-                  <button 
-                    onClick={handleLogout}
-                    className="text-xs font-bold tracking-widest text-royal-muted hover:text-red-400 transition-colors flex items-center gap-2"
-                  >
-                    <Lock size={14} /> LOGOUT
-                  </button>
+                  <div className="flex items-center gap-6">
+                    <button 
+                      onClick={() => setIsSettingsModalOpen(true)}
+                      className="text-xs font-bold tracking-widest text-royal-muted hover:text-royal-gold transition-colors flex items-center gap-2"
+                    >
+                      <Settings size={14} /> SETTINGS
+                    </button>
+                    <button 
+                      onClick={handleLogout}
+                      className="text-xs font-bold tracking-widest text-royal-muted hover:text-red-400 transition-colors flex items-center gap-2"
+                    >
+                      <Lock size={14} /> LOGOUT
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid md:grid-cols-2 gap-6 mb-8">
@@ -783,15 +960,6 @@ export default function App() {
                       placeholder="e.g. Premium Display Mannequin" 
                       value={form.name} 
                       onChange={e => setForm({...form, name: e.target.value})} 
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold tracking-wider text-royal-muted uppercase">Price / Range</label>
-                    <input 
-                      className="w-full p-4 bg-royal-bg border border-royal-border text-royal-text rounded-sm focus:outline-none focus:border-royal-gold transition-colors placeholder:text-royal-muted/50" 
-                      placeholder="e.g. ₹4,500 - ₹6,000" 
-                      value={form.price} 
-                      onChange={e => setForm({...form, price: e.target.value})} 
                     />
                   </div>
                   <div className="space-y-2">
@@ -814,13 +982,73 @@ export default function App() {
                       onChange={e => setForm({...form, desc: e.target.value})} 
                     />
                   </div>
+                  <div className="md:col-span-2 space-y-2">
+                    <label className="text-xs font-bold tracking-wider text-royal-muted uppercase">External Link (Google Drive, Dropbox, etc. for more photos)</label>
+                    <input 
+                      className="w-full p-4 bg-royal-bg border border-royal-border text-royal-text rounded-sm focus:outline-none focus:border-royal-gold transition-colors placeholder:text-royal-muted/50" 
+                      placeholder="https://drive.google.com/..." 
+                      value={form.externalLink} 
+                      onChange={e => setForm({...form, externalLink: e.target.value})} 
+                    />
+                  </div>
 
                   <div className="md:col-span-2 p-8 border-2 border-dashed border-royal-border rounded-lg bg-royal-bg text-center">
-                    <input type="file" multiple hidden id="up" onChange={handleImageUpload} accept="image/*" />
-                    <label htmlFor="up" className="cursor-pointer flex flex-col items-center gap-3 text-royal-muted hover:text-royal-gold transition-colors">
-                      <Camera size={40} className="text-royal-gold/70" />
-                      <span className="text-xs font-bold tracking-widest uppercase">Click to Upload Photos</span>
-                    </label>
+                    <div className="flex flex-col items-center gap-6">
+                      <div className="flex flex-col items-center gap-3 w-full">
+                        <input type="file" multiple hidden id="up" onChange={handleImageUpload} accept="image/*" />
+                        <label htmlFor="up" className="cursor-pointer flex flex-col items-center gap-3 text-royal-muted hover:text-royal-gold transition-colors">
+                          <Camera size={40} className="text-royal-gold/70" />
+                          <span className="text-xs font-bold tracking-widest uppercase">Click to Upload Photos</span>
+                        </label>
+                        <p className="text-[10px] text-royal-muted/70 max-w-sm text-center mt-1">
+                          Photos are automatically optimized for HD clarity while staying under the database size limit.
+                        </p>
+                      </div>
+
+                      <div className="w-full max-w-md flex items-center gap-4">
+                        <div className="h-px bg-royal-border flex-1"></div>
+                        <span className="text-xs font-bold text-royal-muted uppercase">OR</span>
+                        <div className="h-px bg-royal-border flex-1"></div>
+                      </div>
+
+                      <div className="flex flex-col items-center gap-3 w-full">
+                        <span className="text-xs font-bold tracking-widest uppercase text-royal-muted">Add Image URLs (e.g., GitHub, Imgur)</span>
+                        <p className="text-[10px] text-royal-muted/70 max-w-sm text-center mb-1">
+                          For 100% uncompressed original clarity, paste direct links here.
+                        </p>
+                        <div className="flex w-full max-w-md gap-2">
+                          <input 
+                            type="url"
+                            id="imageUrlInput"
+                            placeholder="https://raw.githubusercontent.com/..."
+                            className="flex-1 p-3 bg-royal-surface border border-royal-border text-royal-text rounded-sm focus:outline-none focus:border-royal-gold transition-colors text-sm"
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                const input = e.currentTarget;
+                                if (input.value) {
+                                  setForm(f => ({ ...f, images: [...f.images, input.value] }));
+                                  input.value = '';
+                                }
+                              }
+                            }}
+                          />
+                          <button 
+                            type="button"
+                            onClick={() => {
+                              const input = document.getElementById('imageUrlInput') as HTMLInputElement;
+                              if (input && input.value) {
+                                setForm(f => ({ ...f, images: [...f.images, input.value] }));
+                                input.value = '';
+                              }
+                            }}
+                            className="px-4 bg-royal-gold text-royal-bg font-bold text-xs tracking-widest rounded-sm hover:bg-white transition-colors"
+                          >
+                            ADD
+                          </button>
+                        </div>
+                      </div>
+                    </div>
                     
                     {form.images.length > 0 && (
                       <div className="flex gap-4 mt-6 flex-wrap justify-center">
@@ -842,7 +1070,7 @@ export default function App() {
                             }}
                             className="relative group cursor-grab active:cursor-grabbing"
                           >
-                            <img src={img} className="w-24 h-24 object-cover rounded-sm border border-royal-border shadow-sm" alt="Upload preview" />
+                            <img src={img} className="h-24 w-auto object-contain rounded-sm border border-royal-border shadow-sm bg-royal-surface" alt="Upload preview" />
                             <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center rounded-sm">
                               <GripHorizontal className="text-white" size={20} />
                             </div>
@@ -873,7 +1101,7 @@ export default function App() {
                       className="px-8 border border-royal-border text-royal-text rounded-sm font-bold text-xs tracking-widest hover:bg-royal-bg transition-colors"
                       onClick={() => {
                         setIsEditing(null); 
-                        setForm({ name: "", category: "Ladies", price: "", desc: "", images: [] });
+                        setForm({ name: "", category: "Ladies", desc: "", images: [], externalLink: "" });
                       }}
                     >
                       CANCEL
@@ -890,7 +1118,7 @@ export default function App() {
                       products.map(p => (
                         <div key={p.id} className="flex items-center justify-between p-4 bg-royal-bg border border-royal-border rounded-sm hover:border-royal-gold/50 transition-colors">
                           <div className="flex items-center gap-4">
-                            {p.images[0] && <img src={p.images[0]} className="w-12 h-12 object-cover rounded-sm border border-royal-border" alt={p.name} /> }
+                            {p.images[0] && <img src={p.images[0]} className="w-12 h-12 object-contain bg-royal-surface rounded-sm border border-royal-border" alt={p.name} /> }
                             <div>
                               <div className="font-serif text-lg text-royal-text">{p.name}</div>
                               <div className="text-xs font-bold tracking-wider text-royal-gold uppercase">{p.category}</div>
@@ -921,6 +1149,95 @@ export default function App() {
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* --- LOOKBOOK MODAL --- */}
+        <AnimatePresence>
+          {isLookbookModalOpen && (
+            <motion.div 
+              initial={{ opacity: 0 }} 
+              animate={{ opacity: 1 }} 
+              exit={{ opacity: 0 }} 
+              className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 md:p-8"
+            >
+              <div className="bg-royal-surface w-full max-w-6xl h-[80vh] md:h-[90vh] rounded-xl shadow-2xl border border-royal-border flex flex-col overflow-hidden relative">
+                <div className="flex justify-between items-center p-4 border-b border-royal-border bg-royal-bg">
+                  <h3 className="font-serif text-xl text-royal-text flex items-center gap-2">
+                    <ImageIcon size={20} className="text-royal-gold" /> Exclusive Lookbook
+                  </h3>
+                  <button 
+                    onClick={() => setIsLookbookModalOpen(false)}
+                    className="p-2 bg-royal-surface rounded-full text-royal-muted hover:text-white hover:bg-red-500/20 transition-colors border border-royal-border"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+                <div className="flex-1 w-full bg-black relative">
+                  {modalIframeUrl ? (
+                    <iframe 
+                      src={modalIframeUrl} 
+                      className="w-full h-full border-0" 
+                      title="Exclusive Lookbook"
+                      allowFullScreen
+                    />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-royal-muted">
+                      No lookbook URL configured.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* --- SETTINGS MODAL --- */}
+        <AnimatePresence>
+          {isSettingsModalOpen && (
+            <motion.div 
+              initial={{ opacity: 0 }} 
+              animate={{ opacity: 1 }} 
+              exit={{ opacity: 0 }} 
+              className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+            >
+              <div className="bg-royal-surface p-8 rounded-xl shadow-2xl max-w-md w-full border border-royal-border">
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="font-serif text-2xl text-royal-text">Global Settings</h3>
+                  <button 
+                    onClick={() => setIsSettingsModalOpen(false)}
+                    className="p-2 hover:bg-royal-bg rounded-full text-royal-muted transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+                <div className="space-y-4 mb-8">
+                  <div>
+                    <label className="text-xs font-bold tracking-wider text-royal-muted uppercase mb-2 block">Lookbook URL (Google Drive, Pinterest, etc.)</label>
+                    <input 
+                      type="url"
+                      className="w-full p-4 bg-royal-bg border border-royal-border text-royal-text rounded-sm focus:outline-none focus:border-royal-gold transition-colors placeholder:text-royal-muted/50" 
+                      placeholder="https://drive.google.com/..." 
+                      defaultValue={lookbookUrl}
+                      id="lookbookUrlInput"
+                    />
+                    <p className="text-[10px] text-royal-muted mt-2">
+                      This link will be embedded in the "Explore Exclusive Lookbook" popup. Use a public Google Drive folder embed link or Pinterest board link for free storage.
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => {
+                    const el = document.getElementById('lookbookUrlInput') as HTMLInputElement;
+                    if (el) saveSettings(el.value);
+                  }}
+                  className="w-full py-4 bg-royal-gold text-royal-bg font-bold tracking-widest text-xs rounded-sm hover:bg-white transition-colors"
+                >
+                  SAVE SETTINGS
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
       </main>
 
       {/* --- 3. FOOTER --- */}
@@ -929,14 +1246,13 @@ export default function App() {
           <div className="text-center md:text-left">
             <h3 className="font-serif text-2xl text-royal-text mb-2">COSMO <span className="text-royal-gold italic">Fibres</span></h3>
             <p className="text-sm tracking-widest uppercase mb-1">Kerala, India • {DISPLAY_PHONE}</p>
-            <p className="text-[10px] tracking-widest uppercase text-royal-muted/50">* All prices are exclusive of 18% GST and transportation charges.</p>
           </div>
           <div className="text-center md:text-right flex flex-col items-center md:items-end">
             <p className="text-xs tracking-widest uppercase opacity-50 mb-2">© 2026 Premium Showroom Excellence</p>
             <p className="text-xs opacity-30 mb-4">Designed for elegance and durability.</p>
             <button 
               onClick={() => isAdmin ? navigateTo("admin") : setShowPasscodeModal(true)}
-              className="text-[10px] tracking-widest uppercase text-royal-muted hover:text-royal-gold flex items-center gap-2 transition-colors"
+              className="text-[10px] tracking-widest uppercase text-royal-muted hover:text-royal-gold flex items-center gap-2 hover:scale-105 transition-all"
               title="Staff Access"
             >
               <Lock size={12} /> STAFF LOGIN

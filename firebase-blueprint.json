@@ -11,7 +11,7 @@
         },
         "category": {
           "type": "string",
-          "description": "The category of the product (e.g., Ladies, Gents, Kids, Others)."
+          "description": "The category of the product (e.g., Ladies, Gents, Kids, Hangers, Others)."
         },
         "price": {
           "type": "string",
@@ -20,6 +20,10 @@
         "desc": {
           "type": "string",
           "description": "The description of the product."
+        },
+        "externalLink": {
+          "type": "string",
+          "description": "An external link to more photos (e.g., Google Drive)."
         },
         "images": {
           "type": "array",

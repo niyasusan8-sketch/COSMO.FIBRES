@@ -51,7 +51,9 @@ service cloud.firestore {
     }
 
     function uidNotModified() {
-      return !('authorUID' in request.resource.data) || request.resource.data.authorUID == resource.data.authorUID;
+      return !('authorUID' in request.resource.data) || 
+             !('authorUID' in resource.data) || 
+             request.resource.data.authorUID == resource.data.authorUID;
     }
 
     function hasRequiredFields(fields) {
@@ -84,12 +86,13 @@ service cloud.firestore {
     // ===============================================================
 
     function isValidProduct() {
-      return hasOnlyAllowedFields(['name', 'category', 'price', 'desc', 'images', 'createdAt', 'authorUID']) &&
+      return hasOnlyAllowedFields(['name', 'category', 'price', 'desc', 'images', 'externalLink', 'createdAt', 'authorUID']) &&
              hasRequiredFields(['name', 'category', 'images', 'createdAt', 'authorUID']) &&
              validStringLength('name', 1, 100) &&
-             request.resource.data.category in ['Ladies', 'Gents', 'Kids', 'Others'] &&
+             request.resource.data.category in ['Ladies', 'Gents', 'Kids', 'Hangers', 'Others'] &&
              isValidOptionalString('price', 0, 50) &&
              isValidOptionalString('desc', 0, 2000) &&
+             isValidOptionalString('externalLink', 0, 2000) &&
              isValidList('images', 10) &&
              request.resource.data.createdAt is number &&
              request.resource.data.authorUID is string;
@@ -119,7 +122,7 @@ service cloud.firestore {
       allow update: if isAdmin() && 
                        isValidProduct() && 
                        uidNotModified() &&
-                       request.resource.data.createdAt == resource.data.createdAt;
+                       (!('createdAt' in resource.data) || request.resource.data.createdAt == resource.data.createdAt);
                        
       // Only admins can delete products
       allow delete: if isAdmin();
@@ -133,6 +136,10 @@ service cloud.firestore {
       allow create: if isAdmin() && isValidUser() && request.auth.uid == userId;
       allow update: if isAdmin() && isValidUser() && request.auth.uid == userId;
       allow delete: if isAdmin();
+    }
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
     }
   }
 }
