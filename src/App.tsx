@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useRef } from "react";
 import { 
   Phone, MapPin, Search, ChevronLeft, ChevronRight,
-  Trash2, Camera, Edit3, MessageCircle, ArrowRight, Settings, Lock, X, Loader2, Share2, GripHorizontal, Facebook, Link as LinkIcon, Image as ImageIcon
+  Trash2, Camera, Edit3, MessageCircle, ArrowRight, Settings, Lock, X, Loader2, Share2, GripHorizontal, Facebook, Link as LinkIcon, Image as ImageIcon, ShoppingBag, Plus, Minus
 } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useScroll, useSpring } from "framer-motion";
 import { Helmet } from "react-helmet-async";
 import imageCompression from 'browser-image-compression';
 import { 
   auth, db, googleProvider, signInWithPopup, signOut, onAuthStateChanged, 
   signInWithEmailAndPassword, createUserWithEmailAndPassword,
-  collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy
+  collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy,
+  storage, ref, uploadBytes, getDownloadURL
 } from "./firebase";
 
 const PHONE_NUMBER = "919447478429"; 
@@ -72,6 +73,7 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
   const [lookbookUrl, setLookbookUrl] = useState("");
+  const [imageRatio, setImageRatio] = useState("aspect-[3/4]");
 
   // New UI States
   const [isLoading, setIsLoading] = useState(true);
@@ -85,6 +87,20 @@ export default function App() {
   const [showShareMenu, setShowShareMenu] = useState(false);
   const shareMenuRef = useRef<HTMLDivElement>(null);
   const [forceUpdate, setForceUpdate] = useState(0);
+  
+  const { scrollYProgress } = useScroll();
+  const scaleX = useSpring(scrollYProgress, {
+    stiffness: 100,
+    damping: 30,
+    restDelta: 0.001
+  });
+  
+  const [quickViewProduct, setQuickViewProduct] = useState<any>(null);
+  const [quickViewIndex, setQuickViewIndex] = useState(0);
+  
+  // Quote Cart State
+  const [quoteCart, setQuoteCart] = useState<any[]>([]);
+  const [isCartOpen, setIsCartOpen] = useState(false);
   
   // Premium UI States
   const [toast, setToast] = useState<{message: string, type: 'success' | 'error'} | null>(null);
@@ -127,9 +143,11 @@ export default function App() {
       }
     });
 
-    const q = query(collection(db, "products"), orderBy("createdAt", "desc"));
+    const q = query(collection(db, "products"));
     const unsubscribeProducts = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      // Sort client-side so older products without createdAt don't disappear
+      data.sort((a: any, b: any) => (b.createdAt || 0) - (a.createdAt || 0));
       setProducts(data);
       setIsLoading(false);
       
@@ -284,16 +302,19 @@ export default function App() {
     
     for (const file of files) {
       try {
-        // Higher quality compression to maintain clarity while staying under 1MB limit
+        // BALANCED COMPRESSION: Higher quality but still safe for Firestore's 1MB document limit.
+        // Base64 adds 33% size, so a 300KB image becomes ~400KB of text.
+        // This allows ~2 high-quality images per product without crashing.
         const options = {
-          maxSizeMB: 0.5, // 500KB per image (much clearer than before)
-          maxWidthOrHeight: 1920, // Full HD resolution
+          maxSizeMB: 0.3, // 300KB max per image
+          maxWidthOrHeight: 1200, // Good resolution for phones/web
           useWebWorker: true,
-          initialQuality: 0.9,
+          initialQuality: 0.85,
         };
         
         const compressedFile = await imageCompression(file, options);
         
+        // Reverting to Base64 (Text) storage temporarily
         const reader = new FileReader();
         reader.onloadend = () => {
           const dataUrl = reader.result as string;
@@ -389,9 +410,37 @@ export default function App() {
     window.scrollTo(0, 0);
   };
 
-  const getWhatsAppLink = (pName: string) => {
-    const msg = encodeURIComponent(`Hi Cosmo Fibres, I am interested in ${pName}.`);
+  const getWhatsAppLink = (pName: string, imageUrl: string) => {
+    const msg = encodeURIComponent(`Hi Cosmo Fibres, I am interested in ${pName}. Reference Image: ${imageUrl}`);
     return `https://wa.me/${PHONE_NUMBER}?text=${msg}`;
+  };
+
+  const addToQuote = (product: any, image: string, subHeadingName: string) => {
+    setQuoteCart(prev => {
+      const existing = prev.find(item => item.product.id === product.id && item.image === image);
+      if (existing) {
+        return prev.map(item => item === existing ? { ...item, quantity: item.quantity + 1 } : item);
+      }
+      return [...prev, { product, image, subHeadingName, quantity: 1 }];
+    });
+    setToast({ message: "Added to Quote List", type: "success" });
+  };
+
+  const updateQuoteQuantity = (index: number, delta: number) => {
+    setQuoteCart(prev => {
+      const newCart = [...prev];
+      newCart[index].quantity += delta;
+      if (newCart[index].quantity <= 0) newCart.splice(index, 1);
+      return newCart;
+    });
+  };
+
+  const getBulkWhatsAppLink = () => {
+    let msg = "Hi Cosmo Fibres, I would like a bulk quote for the following items:\n\n";
+    quoteCart.forEach((item, idx) => {
+      msg += `${idx + 1}. ${item.subHeadingName || item.product.name} (Qty: ${item.quantity})\nRef: ${item.image}\n\n`;
+    });
+    return `https://wa.me/${PHONE_NUMBER}?text=${encodeURIComponent(msg)}`;
   };
 
   const handleShare = async () => {
@@ -451,9 +500,13 @@ I would like to know more about:
       (p.name.toLowerCase().includes(searchTerm.toLowerCase()))
     )
     .flatMap(p => 
-      categoryFilter === "All" 
-        ? p.images.map((img, idx) => ({ ...p, displayImage: img, imageIndex: idx, uniqueId: `${p.id}-${idx}` }))
-        : [{ ...p, displayImage: p.images[0], imageIndex: 0, uniqueId: p.id }]
+      p.images.map((img: string, idx: number) => ({ 
+        ...p, 
+        displayImage: img, 
+        imageIndex: idx, 
+        uniqueId: `${p.id}-${idx}`,
+        subHeadingName: p.images.length > 1 ? `${p.name} (View ${idx + 1})` : p.name
+      }))
     );
 
   return (
@@ -466,14 +519,26 @@ I would like to know more about:
         {selectedProduct?.images?.[0] && <meta property="og:image" content={selectedProduct.images[0]} />}
         <meta property="og:url" content={window.location.href} />
         <meta property="og:type" content="website" />
+        <style>{`
+          ::-webkit-scrollbar { width: 6px; }
+          ::-webkit-scrollbar-track { background: #050505; }
+          ::-webkit-scrollbar-thumb { background: #D4AF37; border-radius: 10px; }
+          ::-webkit-scrollbar-thumb:hover { background: #F3E5AB; }
+        `}</style>
       </Helmet>
       
+      {/* --- SCROLL PROGRESS BAR --- */}
+      <motion.div 
+        className="fixed top-0 left-0 right-0 h-[2px] bg-royal-gold origin-left z-[100]" 
+        style={{ scaleX }} 
+      />
+
       {/* --- PREMIUM FLOATING WHATSAPP BUTTON --- */}
       <motion.div 
         initial={{ scale: 0, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         transition={{ delay: 1, type: "spring", stiffness: 200, damping: 20 }}
-        className="fixed bottom-8 right-8 z-50 flex items-center justify-end group"
+        className="fixed bottom-6 right-6 md:bottom-8 md:right-8 z-[999] flex items-center justify-end group"
       >
         <a 
           href={`https://wa.me/${PHONE_NUMBER}?text=${encodeURIComponent("Hi Cosmo Fibres, I'm interested in your products.")}`} 
@@ -551,6 +616,115 @@ I would like to know more about:
         )}
       </AnimatePresence>
       
+      {/* --- QUICK VIEW MODAL --- */}
+      <AnimatePresence>
+        {quickViewProduct && (
+          <motion.div 
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[150] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4 md:p-8"
+            onClick={() => setQuickViewProduct(null)}
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 20 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              className="bg-royal-surface w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-xl shadow-2xl border border-royal-border flex flex-col md:flex-row"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Left: Image Carousel */}
+              <div className="w-full md:w-3/5 relative bg-royal-bg flex items-center justify-center min-h-[400px] overflow-hidden group">
+                <button 
+                  onClick={() => setQuickViewProduct(null)}
+                  className="absolute top-4 left-4 z-10 bg-black/50 text-white p-2 rounded-full hover:bg-royal-gold md:hidden"
+                >
+                  <X size={20} />
+                </button>
+                
+                <img 
+                  src={quickViewProduct.images[quickViewIndex]} 
+                  className="max-w-full max-h-[60vh] md:max-h-[90vh] object-contain transition-transform duration-700 ease-out group-hover:scale-125 cursor-zoom-in"
+                  alt={quickViewProduct.name}
+                />
+                
+                {quickViewProduct.images.length > 1 && (
+                  <>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); setQuickViewIndex(prev => prev === 0 ? quickViewProduct.images.length - 1 : prev - 1); }}
+                      className="absolute left-4 top-1/2 -translate-y-1/2 bg-black/50 text-white p-3 rounded-full hover:bg-royal-gold transition-colors"
+                    >
+                      <ChevronLeft size={24} />
+                    </button>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); setQuickViewIndex(prev => prev === quickViewProduct.images.length - 1 ? 0 : prev + 1); }}
+                      className="absolute right-4 top-1/2 -translate-y-1/2 bg-black/50 text-white p-3 rounded-full hover:bg-royal-gold transition-colors"
+                    >
+                      <ChevronRight size={24} />
+                    </button>
+                    
+                    <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-2 px-4 overflow-x-auto">
+                      {quickViewProduct.images.map((img: string, idx: number) => (
+                        <button 
+                          key={idx}
+                          onClick={(e) => { e.stopPropagation(); setQuickViewIndex(idx); }}
+                          className={`w-16 h-16 flex-shrink-0 border-2 rounded-sm overflow-hidden ${quickViewIndex === idx ? 'border-royal-gold' : 'border-transparent opacity-50 hover:opacity-100'}`}
+                        >
+                          <img src={img} className="w-full h-full object-cover" alt="" />
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+              
+              {/* Right: Details */}
+              <div className="w-full md:w-2/5 p-8 flex flex-col relative">
+                <button 
+                  onClick={() => setQuickViewProduct(null)}
+                  className="absolute top-4 right-4 text-royal-muted hover:text-royal-text hidden md:block"
+                >
+                  <X size={24} />
+                </button>
+                
+                <span className="text-xs font-bold tracking-[0.2em] text-royal-gold uppercase mb-2">{quickViewProduct.category}</span>
+                <h2 className="font-serif text-3xl text-royal-text mb-4">{quickViewProduct.subHeadingName || quickViewProduct.name}</h2>
+                
+                <div className="w-12 h-px bg-royal-gold mb-6" />
+                
+                <p className="text-royal-muted text-sm leading-relaxed mb-8 flex-grow whitespace-pre-line">
+                  {quickViewProduct.desc}
+                </p>
+                
+                <div className="flex flex-col gap-3 mt-auto">
+                  <div className="flex gap-3">
+                    <a 
+                      href={getWhatsAppLink(quickViewProduct.subHeadingName || quickViewProduct.name, quickViewProduct.images[quickViewIndex])} 
+                      target="_blank" 
+                      rel="noreferrer" 
+                      className="flex-1 bg-royal-gold text-royal-bg py-4 rounded-sm font-bold text-[10px] md:text-xs tracking-widest flex items-center justify-center gap-2 hover:bg-white transition-colors"
+                    >
+                      <MessageCircle size={16}/> ENQUIRE
+                    </a>
+                    <button 
+                      onClick={() => addToQuote(quickViewProduct, quickViewProduct.images[quickViewIndex], quickViewProduct.subHeadingName || quickViewProduct.name)}
+                      className="flex-1 border border-royal-gold text-royal-gold py-4 rounded-sm font-bold text-[10px] md:text-xs tracking-widest flex items-center justify-center gap-2 hover:bg-royal-gold hover:text-royal-bg transition-colors"
+                    >
+                      <ShoppingBag size={16}/> ADD TO QUOTE
+                    </button>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      setQuickViewProduct(null);
+                      navigateTo("detail", quickViewProduct, quickViewIndex);
+                    }}
+                    className="w-full border border-royal-border text-royal-text py-4 rounded-sm font-bold text-xs tracking-widest hover:border-royal-gold hover:text-royal-gold transition-colors"
+                  >
+                    VIEW FULL DETAILS
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* --- 1. TOP TOGGLE BAR --- */}
       <div className="bg-royal-surface text-royal-muted h-10 flex justify-center items-center gap-4 md:gap-8 text-[10px] md:text-xs font-medium tracking-widest fixed top-0 w-full z-50 border-b border-royal-border">
         <a href={`tel:${PHONE_NUMBER}`} className="flex items-center gap-2 hover:text-royal-gold transition-colors">
@@ -701,20 +875,37 @@ I would like to know more about:
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-3 mb-8">
-                {["All", ...CATEGORIES].map(cat => (
-                  <button 
-                    key={cat} 
-                    onClick={() => setCategoryFilter(cat)} 
-                    className={`px-6 py-2.5 rounded-full text-xs font-bold tracking-wider transition-all hover:scale-105 active:scale-95 ${
-                      categoryFilter === cat 
-                        ? 'bg-royal-gold text-royal-bg shadow-md shadow-royal-gold/20' 
-                        : 'border border-royal-border text-royal-muted hover:border-royal-gold hover:text-royal-gold'
-                    }`}
+              <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 mb-8">
+                <div className="flex flex-wrap gap-3">
+                  {["All", ...CATEGORIES].map(cat => (
+                    <button 
+                      key={cat} 
+                      onClick={() => setCategoryFilter(cat)} 
+                      className={`px-6 py-2.5 rounded-full text-xs font-bold tracking-wider transition-all hover:scale-105 active:scale-95 ${
+                        categoryFilter === cat 
+                          ? 'bg-royal-gold text-royal-bg shadow-md shadow-royal-gold/20' 
+                          : 'border border-royal-border text-royal-muted hover:border-royal-gold hover:text-royal-gold'
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+                
+                <div className="flex items-center gap-3 bg-royal-surface border border-royal-border p-1.5 rounded-full shadow-sm">
+                  <span className="text-[10px] font-bold tracking-widest text-royal-muted uppercase pl-3">Photo Size:</span>
+                  <select 
+                    className="bg-royal-bg border border-royal-border text-royal-gold text-xs font-bold tracking-wider focus:outline-none focus:border-royal-gold cursor-pointer rounded-full px-4 py-1.5"
+                    value={imageRatio}
+                    onChange={(e) => setImageRatio(e.target.value)}
                   >
-                    {cat}
-                  </button>
-                ))}
+                    <option value="aspect-[3/4]">Portrait (3:4)</option>
+                    <option value="aspect-square">Square (1:1)</option>
+                    <option value="aspect-[4/3]">Landscape (4:3)</option>
+                    <option value="aspect-video">Cinematic (16:9)</option>
+                    <option value="aspect-auto">Original Fit</option>
+                  </select>
+                </div>
               </div>
 
               {lookbookUrl && (
@@ -762,20 +953,41 @@ I would like to know more about:
                       whileHover={{ y: -8 }}
                       key={p.uniqueId} 
                       className="bg-royal-surface group cursor-pointer border border-royal-border shadow-sm hover:shadow-xl hover:shadow-black/50 hover:border-royal-gold/50 transition-all duration-300"
-                      onClick={() => navigateTo("detail", p, p.imageIndex)}
+                      onClick={() => {
+                        setQuickViewProduct(p);
+                        setQuickViewIndex(p.imageIndex);
+                      }}
                     >
-                      <div className="overflow-hidden bg-royal-bg relative flex items-center justify-center">
+                      <div className={`overflow-hidden bg-royal-bg relative flex items-center justify-center ${imageRatio}`}>
                         {p.displayImage ? (
-                          <img src={p.displayImage} loading="lazy" className="w-full h-auto object-contain group-hover:scale-105 transition-transform duration-700 opacity-90 group-hover:opacity-100" alt={p.name} />
+                          <img 
+                            src={p.displayImage} 
+                            loading="lazy" 
+                            className={`w-full h-full ${imageRatio === 'aspect-auto' ? 'object-contain' : 'object-cover'} group-hover:scale-105 transition-transform duration-700 opacity-90 group-hover:opacity-100`} 
+                            alt={p.name} 
+                          />
                         ) : (
-                          <div className="w-full aspect-square flex items-center justify-center text-royal-border"><Camera size={48} /></div>
+                          <div className="w-full h-full min-h-[200px] flex items-center justify-center text-royal-border"><Camera size={48} /></div>
                         )}
                         <div className="absolute top-4 left-4 bg-royal-bg/90 backdrop-blur-sm px-3 py-1 text-[10px] font-bold tracking-widest uppercase text-royal-gold border border-royal-gold/20">
                           {p.category}
                         </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            addToQuote(p, p.displayImage, p.subHeadingName || p.name);
+                          }}
+                          className="absolute bottom-4 right-4 bg-royal-gold text-royal-bg p-3 rounded-full opacity-0 group-hover:opacity-100 transition-all duration-300 hover:scale-110 shadow-lg translate-y-4 group-hover:translate-y-0"
+                          title="Add to Quote"
+                        >
+                          <ShoppingBag size={18} />
+                        </button>
                       </div>
                       <div className="p-6 text-center">
                         <h3 className="font-serif text-xl text-royal-text">{p.name}</h3>
+                        {p.images.length > 1 && (
+                          <p className="text-xs text-royal-muted mt-2 font-medium tracking-wider uppercase">View {p.imageIndex + 1}</p>
+                        )}
                       </div>
                     </motion.div>
                   ))}
@@ -897,7 +1109,7 @@ I would like to know more about:
                   
                   <div className="flex flex-col sm:flex-row gap-4">
                     <a 
-                      href={getWhatsAppLink(selectedProduct.name)} 
+                      href={getWhatsAppLink(selectedProduct.name, selectedProduct.images[currentImageIndex])} 
                       target="_blank" 
                       rel="noreferrer" 
                       className="flex-1 bg-royal-gold text-royal-bg py-4 px-6 rounded-sm font-bold text-xs tracking-widest flex items-center justify-center gap-3 hover:bg-white transition-colors"
@@ -1240,24 +1452,37 @@ I would like to know more about:
 
       </main>
 
-      {/* --- 3. FOOTER --- */}
-      <footer className="bg-royal-surface text-royal-muted py-16 px-6 md:px-12 border-t border-royal-border">
-        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-8">
-          <div className="text-center md:text-left">
-            <h3 className="font-serif text-2xl text-royal-text mb-2">COSMO <span className="text-royal-gold italic">Fibres</span></h3>
-            <p className="text-sm tracking-widest uppercase mb-1">Kerala, India • {DISPLAY_PHONE}</p>
+      {/* --- PREMIUM FOOTER --- */}
+      <footer className="bg-[#050505] border-t border-royal-border pt-16 pb-8 px-6 md:px-12 relative z-10">
+        <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-12 mb-12">
+          <div>
+            <h3 className="font-serif text-2xl font-bold tracking-wide text-royal-text mb-4">
+              COSMO <span className="text-royal-gold italic font-normal">Fibres</span>
+            </h3>
+            <p className="text-royal-muted text-sm leading-relaxed max-w-xs">
+              Kerala's premier manufacturer of high-quality fiberglass mannequins and display solutions since 1998.
+            </p>
           </div>
-          <div className="text-center md:text-right flex flex-col items-center md:items-end">
-            <p className="text-xs tracking-widest uppercase opacity-50 mb-2">© 2026 Premium Showroom Excellence</p>
-            <p className="text-xs opacity-30 mb-4">Designed for elegance and durability.</p>
-            <button 
-              onClick={() => isAdmin ? navigateTo("admin") : setShowPasscodeModal(true)}
-              className="text-[10px] tracking-widest uppercase text-royal-muted hover:text-royal-gold flex items-center gap-2 hover:scale-105 transition-all"
-              title="Staff Access"
-            >
-              <Lock size={12} /> STAFF LOGIN
-            </button>
+          <div>
+            <h4 className="text-royal-gold text-xs font-bold tracking-[0.2em] uppercase mb-4">Contact</h4>
+            <ul className="text-royal-muted text-sm space-y-3">
+              <li className="flex items-center gap-2"><Phone size={14} className="text-royal-gold"/> {DISPLAY_PHONE}</li>
+              <li className="flex items-center gap-2"><MapPin size={14} className="text-royal-gold"/> Puthiyara & Pavangadu</li>
+              <li className="flex items-center gap-2 text-transparent select-none"><MapPin size={14}/> Kozhikode, Kerala 673004</li>
+            </ul>
           </div>
+          <div>
+            <h4 className="text-royal-gold text-xs font-bold tracking-[0.2em] uppercase mb-4">Quick Links</h4>
+            <ul className="text-royal-muted text-sm space-y-3">
+              <li><button onClick={() => { window.scrollTo(0,0); navigateTo("collection"); }} className="hover:text-royal-gold transition-colors">View Collection</button></li>
+              <li><button onClick={() => { window.scrollTo(0,0); setShowPasscodeModal(true); }} className="hover:text-royal-gold transition-colors">Staff Portal</button></li>
+              <li><a href={getWhatsAppLink("General Enquiry", "")} target="_blank" rel="noreferrer" className="hover:text-royal-gold transition-colors">WhatsApp Support</a></li>
+            </ul>
+          </div>
+        </div>
+        <div className="max-w-7xl mx-auto border-t border-royal-border/50 pt-8 flex flex-col md:flex-row justify-between items-center gap-4 text-xs text-royal-muted/50 tracking-widest">
+          <p>&copy; {new Date().getFullYear()} Cosmo Fibres. All rights reserved.</p>
+          <p>DESIGNED FOR EXCELLENCE.</p>
         </div>
       </footer>
     </div>
